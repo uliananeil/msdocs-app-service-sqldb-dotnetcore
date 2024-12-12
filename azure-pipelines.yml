@@ -1,0 +1,149 @@
+trigger: none 
+
+pool:
+  vmImage: 'windows-latest'
+
+variables:
+  solution: '**/*.sln'
+  buildPlatform: 'Any CPU'
+  buildConfiguration: 'Release'
+
+stages:
+- stage: Build
+  jobs:
+  - job: BuildJob
+    steps:
+    - task: UseDotNet@2
+      inputs:
+        packageType: 'sdk'
+        version: '6.0.x'
+      displayName: 'Use dotnet 6.0.x'
+    - script: |
+        dotnet tool install --global dotnet-ef --version 6.*
+      displayName: 'Install dotnet tools'
+    - task: PowerShell@2
+      inputs:
+        targetType: 'inline'
+        script: |
+          if ($env:BUILD_REASON -ne "PullRequest" -and $env:BUILD_REASON -ne "Manual" -and $env:BUILD_SOURCEVERSIONMESSAGE -notlike "Merged PR*") {
+            if ($env:BUILD_SOURCEVERSIONMESSAGE -notmatch "^[A-Za-z]+-[0-9]+") {
+              Write-Host "Invalid commit message format. It should start with {Project-code}-{work-item-number} your comment but got '$($env:BUILD_SOURCEVERSIONMESSAGE)'."
+              exit 1
+            }
+          }
+      displayName: 'Validate Commit Message'
+    - task: PowerShell@2
+      inputs:
+        targetType: 'inline'
+        script: |
+          $BUILD_NUMBER = "Infra-CI-CD-" + (Get-Date -Format "yyyy.MM.dd") + "-" + $env:BUILD_BUILDID
+          Write-Host "##vso[build.updatebuildnumber]$BUILD_NUMBER"
+      displayName: 'Update Build Number'
+
+    - task: DotNetCoreCLI@2
+      inputs:
+        command: 'build'
+        projects: '$(System.DefaultWorkingDirectory)'
+        arguments: '--configuration $(buildConfiguration)'
+      displayName: 'Build dotnet'
+
+    - task: DotNetCoreCLI@2
+      inputs:
+        command: 'publish'
+        publishWebProjects: true
+        arguments: '--output $(Build.ArtifactStagingDirectory) --configuration $(buildConfiguration)'
+        zipAfterPublish: true
+      displayName: 'Publish dotnet'
+
+    - script: |
+        dotnet ef migrations script -p DotNetCoreSqlDb\DotNetCoreSqlDb.csproj -o migration.sql -i
+      displayName: 'Prepare SQL Migration Script'
+
+    - task: PublishBuildArtifacts@1
+      inputs:
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+        ArtifactName: 'app'
+        publishLocation: 'Container'
+      displayName: 'App artifact'
+      
+    - task: PublishBuildArtifacts@1
+      inputs:
+        PathtoPublish: 'migration.sql'
+        ArtifactName: 'sql'
+        publishLocation: 'Container'
+      displayName: 'SQL artifact'
+
+- stage: DeployApp
+  displayName: 'Deploy App on Staging Slot'
+  dependsOn: Build
+  variables:
+  - group: DEV
+  jobs:
+  - job: DeployApp
+    steps:
+
+    - task: DownloadBuildArtifacts@1
+      inputs:
+        buildType: 'current'
+        downloadType: 'single'
+        artifactName: 'sql'
+        downloadPath: '$(System.ArtifactsDirectory)\sql'
+      displayName: 'Download sql artifact'
+
+    - task: DownloadBuildArtifacts@1
+      inputs:
+        buildType: 'current'
+        downloadType: 'single'
+        artifactName: 'app'
+        downloadPath: '$(System.ArtifactsDirectory)'
+      displayName: 'Download sql artifact'
+
+    - task: SqlAzureDacpacDeployment@1
+      inputs:
+        azureSubscription: 'ado-lab-sa'
+        AuthenticationType: 'server'
+        ServerName: 'sql-12345678-eastus-dev.database.windows.net'
+        DatabaseName: 'sqldb-12345678-eastus-dev'
+        SqlUsername: 'azureuser'
+        SqlPassword: 'Qwertyu1234!'
+        deployType: 'SqlTask'
+        SqlFile: '$(System.ArtifactsDirectory)\sql\sql\migration.sql'
+        IpDetectionMethod: 'AutoDetect'
+      displayName: 'Update Database Schema'
+    
+    - task: AzureWebApp@1
+      inputs:
+        azureSubscription: 'ado-lab-sa'
+        appType: 'webApp'
+        appName: 'app-12345678-eastus-dev'
+        deployToSlotOrASE: true
+        resourceGroupName: 'rg-12345678-eastus-dev'
+        slotName: 'app-12345678-eastus-dev'
+        package: '$(System.ArtifactsDirectory)\app\**/*.zip'
+        deploymentMethod: 'auto'
+      displayName: 'Deploy WebApp'
+  
+- stage: SwapSlots
+  dependsOn: DeployApp
+  condition: |
+    and(
+      succeeded(),
+      or(
+        eq(variables['Build.SourceBranch'], 'refs/heads/develop'),
+        eq(variables['Build.SourceBranch'], 'refs/heads/main'),
+        startsWith(variables['Build.SourceBranch'], 'refs/heads/release/')
+      )
+    )
+  jobs:
+  - deployment: SwapSlotsInProd
+    environment: 'PROD'
+  - job: Swap
+    steps:
+    - task: AzureAppServiceManage@0
+      inputs:
+        azureSubscription: 'ado-lab-sa'
+        Action: 'Swap Slots'
+        WebAppName: 'app-12345678-eastus-dev'
+        ResourceGroupName: 'rg-12345678-eastus-dev'
+        SourceSlot: 'app-12345678-eastus-dev'
+      displayName: 'Swap slot'
