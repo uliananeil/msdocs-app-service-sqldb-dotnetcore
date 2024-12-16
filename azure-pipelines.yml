@@ -4,12 +4,15 @@ pool:
   vmImage: 'windows-latest'
 
 variables:
-  solution: '**/*.sln'
-  buildPlatform: 'Any CPU'
-  buildConfiguration: 'Release'
+- group: azure-adolearn-tfstate
+- group: prod
 
 stages:
 - stage: Build
+  variables:
+    solution: '**/*.sln'
+    buildPlatform: 'Any CPU'
+    buildConfiguration: 'Release'
   jobs:
   - job: BuildJob
     steps:
@@ -76,8 +79,6 @@ stages:
 - stage: DeployApp
   displayName: 'Deploy App on Staging Slot'
   dependsOn: Build
-  variables:
-  - group: DEV
   jobs:
   - job: DeployApp
     steps:
@@ -100,12 +101,12 @@ stages:
 
     - task: SqlAzureDacpacDeployment@1
       inputs:
-        azureSubscription: 'ado-lab-sa'
+        azureSubscription: '$(service_connection)'
         AuthenticationType: 'server'
-        ServerName: 'sql-12345678-eastus-dev.database.windows.net'
-        DatabaseName: 'sqldb-12345678-eastus-dev'
-        SqlUsername: 'azureuser'
-        SqlPassword: 'Qwertyu1234!'
+        ServerName: '$(sql_server)'
+        DatabaseName: '$(db_name)'
+        SqlUsername: '$(admin_login)'
+        SqlPassword: '$(admin_pwd)'
         deployType: 'SqlTask'
         SqlFile: '$(System.ArtifactsDirectory)\sql\sql\migration.sql'
         IpDetectionMethod: 'AutoDetect'
@@ -113,12 +114,12 @@ stages:
     
     - task: AzureWebApp@1
       inputs:
-        azureSubscription: 'ado-lab-sa'
+        azureSubscription: '$(service_connection)'
         appType: 'webApp'
-        appName: 'app-12345678-eastus-dev'
+        appName: '$(app_name)'
         deployToSlotOrASE: true
-        resourceGroupName: 'rg-12345678-eastus-dev'
-        slotName: 'app-12345678-eastus-dev'
+        resourceGroupName: '$(env_rg)'
+        slotName: '$(app_name)'
         package: '$(System.ArtifactsDirectory)\app\**/*.zip'
         deploymentMethod: 'auto'
       displayName: 'Deploy WebApp'
@@ -136,14 +137,14 @@ stages:
     )
   jobs:
   - deployment: SwapSlotsInProd
-    environment: 'PROD'
+    environment: 'prod'
   - job: Swap
     steps:
     - task: AzureAppServiceManage@0
       inputs:
-        azureSubscription: 'ado-lab-sa'
+        azureSubscription: '$(service_connection)'
         Action: 'Swap Slots'
-        WebAppName: 'app-12345678-eastus-dev'
-        ResourceGroupName: 'rg-12345678-eastus-dev'
-        SourceSlot: 'app-12345678-eastus-dev'
+        WebAppName: '$(app_name)'
+        ResourceGroupName: '$(env_rg)'
+        SourceSlot: '$(app_name)'
       displayName: 'Swap slot'
