@@ -1,4 +1,12 @@
-trigger: none 
+trigger:
+  branches:
+    include:
+      - feature/*
+      - bugfix/*
+      - hotfix/*
+      - develop
+      - main
+      - release/*
 
 pool:
   vmImage: 'windows-latest'
